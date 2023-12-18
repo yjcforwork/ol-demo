@@ -3,7 +3,14 @@ import { ref, onMounted, watch } from 'vue'
 import { Point } from 'ol/geom'
 import { CreateDraw, addDraw, removeDraw } from '@/views/map/hook/draw.js'
 import { initmap } from '@/views/map/hook/map.js'
-import { scaleLine, zoomout, zoomin } from '@/views/map/hook/controls.js'
+import {
+  initscaleLine,
+  removeScaleLine,
+  initOverViewMap,
+  removeOverViewMap,
+  initMousePosition,
+  removeMousePosition
+} from '@/views/map/hook/controls.js'
 import { vectorsource, vectorLayer } from '@/views/map/hook/vectorLayer.js'
 import VectorSource from 'ol/source/Vector'
 import { Feature } from 'ol'
@@ -233,10 +240,8 @@ const moveFeature = (e) => {
   let point2 = turf.point(toLonLat(timeCoordinates))
   //  计算两点间的角度值
   let bearing = turf.bearing(point1, point2)
-  console.log(bearing)
   //  给图片样式设置角度
   styles['animation'].getImage().setRotation((Math.PI / 180) * (-90 + bearing))
-
   const ctx = getVectorContext(e)
   ctx.setStyle(styles['animation'])
   ctx.drawGeometry(animationPoint)
@@ -261,12 +266,66 @@ const closerfn = () => {
 const container = ref(null)
 const popuptext = ref(null)
 let popupOverlay
+
+// 控件
+let scaleLine
+let overViewMap
+let mousePosition
+const isShowScaleLine = ref(false)
+const isShowOverViewMap = ref(false)
+const isShowMousePosition = ref(false)
+
+// 添加或移除比例尺
+const addOrRemoveScaleLine = () => {
+  if (isShowScaleLine.value) {
+    scaleLine = initscaleLine(map)
+  } else {
+    removeScaleLine(scaleLine, map)
+  }
+}
+// 添加或移除鹰眼图
+const addOrRemoveOverViewMap = () => {
+  if (isShowOverViewMap.value) {
+    overViewMap = initOverViewMap(map)
+  } else {
+    removeOverViewMap(overViewMap, map)
+  }
+}
+// 添加或移除鼠标位置
+const addOrRemoveMousePosition = () => {
+  if (isShowMousePosition.value) {
+    mousePosition = initMousePosition(map)
+  } else {
+    removeMousePosition(mousePosition, map)
+  }
+}
+// 监听控件变化
+watch(isShowScaleLine, addOrRemoveScaleLine)
+watch(isShowOverViewMap, addOrRemoveOverViewMap)
+watch(isShowMousePosition, addOrRemoveMousePosition)
+
+// 监听指定图层要素是否存在
+const isfeatures = (pixel) => {
+  const features = map.forEachFeatureAtPixel(
+    pixel,
+    (feature) => {
+      return feature
+    },
+    {
+      // 指定图层
+      layerFilter: (layer) => {
+        return pointLayer === layer
+      }
+    }
+  )
+  return features
+}
+
 onMounted(() => {
   // 实例化地图
   map = initmap()
   // 添加图层
   map.addLayer(Layer)
-  map.addControl(scaleLine)
   map.addLayer(pointLayer) //轨迹点
   map.addLayer(animatelayer)
 
@@ -277,35 +336,31 @@ onMounted(() => {
   // 监听点击
   map.on('click', (evt) => {
     const pixel = evt.pixel
+    // 接收指定图层要素
+    const features = isfeatures(pixel)
+    if (features) {
+      const coordinate = evt.coordinate
 
-    const features = map.forEachFeatureAtPixel(
-      pixel,
-      (feature) => {
-        return feature
-      },
-      {
-        // 指定图层
-        layerFilter: (layer) => {
-          return pointLayer === layer
-        }
-      }
-    )
-    if (!features) {
+      const hdms = toStringHDMS(toLonLat(coordinate))
+      // 显示弹窗
+      popupOverlay.setPosition(coordinate)
+
+      popuptext.value = `
+      <p class="title">轨迹点${features.values_.index + 1}<p>
+      <p>经纬度: <code> ${hdms} </code></p>
+      <p>车辆速度： <code> ${features.values_.speed}km/h</code></p>
+      <p>时间 <code> ${features.values_.time} </code></p>`
+    } else {
       popupOverlay.setPosition(undefined)
       return
     }
-    const coordinate = evt.coordinate
-
-    const hdms = toStringHDMS(toLonLat(coordinate))
-    // 显示弹窗
-    popupOverlay.setPosition(coordinate)
-
-    popuptext.value = `
-    <p class="title">轨迹点${features.values_.index + 1}<p>
-    <p>经纬度: <code> ${hdms} </code></p>
-    <p>车辆速度： <code> ${features.values_.speed}km/h</code></p>
-    <p>时间 <code> ${features.values_.time} </code></p>
-    `
+  })
+  // 指针变化
+  map.on('pointermove', (evt) => {
+    const pixel = evt.pixel
+    // 接收指定图层要素
+    const features = isfeatures(pixel)
+    map.getTargetElement().style.cursor = features ? 'pointer' : ''
   })
 })
 </script>
@@ -313,7 +368,9 @@ onMounted(() => {
   <div class="login-page">
     <el-container class="page">
       <!-- 标题 -->
-      <el-header class="title">OpenLayers Demo</el-header>
+      <el-header class="head">
+        <h1 class="title">OpenLayers Demo</h1></el-header
+      >
       <el-container class="main">
         <el-main class="mapcontext">
           <!-- 地图 -->
@@ -332,13 +389,6 @@ onMounted(() => {
         </el-main>
         <el-aside width="245px" class="aside">
           <!-- 菜单 -->
-          <div>
-            视图
-            <br />
-            <br />
-            <el-button type="primary" @click="zoomin(map)">缩小</el-button>
-            <el-button type="primary" @click="zoomout(map)">放大</el-button>
-          </div>
           <p>小车运行</p>
           <el-switch
             v-model="isRun"
@@ -346,7 +396,40 @@ onMounted(() => {
             active-text="开启"
             inactive-text="关闭"
           />
+          <!--   <div>
+            视图
+            <br />
+            <br />
+            <el-button type="primary" @click="zoomin(map)">缩小</el-button>
+            <el-button type="primary" @click="zoomout(map)">放大</el-button>
+          </div> -->
           <br />
+
+          <el-collapse accordion width="200px">
+            <el-collapse-item class="">
+              <template #title>
+                <p class="el-collapse-item-title">控件</p>
+              </template>
+              <div class="checkbox">
+                <el-checkbox
+                  v-model="isShowScaleLine"
+                  label="比例尺"
+                  size="large"
+                />
+                <el-checkbox
+                  v-model="isShowOverViewMap"
+                  label="鹰眼图"
+                  size="large"
+                />
+                <el-checkbox
+                  v-model="isShowMousePosition"
+                  label="鼠标位置"
+                  size="large"
+                />
+              </div>
+            </el-collapse-item>
+          </el-collapse>
+          <!-- 绘制 -->
           <div>
             <p>绘制</p>
             <el-switch
@@ -382,11 +465,17 @@ onMounted(() => {
   background-color: #fff;
   .page {
     height: 100%;
-    .title {
+    .head {
       padding: 10px;
-      font-weight: bold;
-      font-size: 24px;
-      margin-left: 10%;
+      // font-weight: bold;
+      // font-size: 24px;
+      // background-color: rgb(51, 51, 51);
+      // margin-bottom: 5px;
+      .title {
+        color: black;
+        margin: auto;
+        margin-left: 10%;
+      }
     }
     .main {
       height: 100%;
@@ -451,5 +540,29 @@ onMounted(() => {
 }
 .ol-popup-closer:after {
   content: '✖';
+}
+
+.checkbox {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  .el-checkbox--large {
+    padding: 0;
+    margin: 0;
+    width: 80px;
+  }
+}
+.el-collapse {
+  width: 200px;
+  margin: auto;
+  border: none;
+  .el-collapse-item-title {
+    font-size: 16px;
+    font-family: 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB',
+      'Microsoft YaHei', '微软雅黑', Arial, sans-serif;
+  }
+  .el-collapse-item {
+    border: none;
+  }
 }
 </style>
